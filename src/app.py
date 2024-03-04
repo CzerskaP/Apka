@@ -9,7 +9,10 @@ from folium.plugins import MarkerCluster
 from random import randint
 import dash_daq as daq
 from dash.exceptions import PreventUpdate
-
+import zipfile
+import tempfile
+from io import BytesIO
+import base64
 
 #Adresy
 typ_nr = {1: '1_Główny', 2: '2_Podrzędny', 4: '4_LEP old', 5: '5_LEP new', 6: '6_LEP indigo', 8: '8_Lasy_Państwowe',
@@ -55,9 +58,11 @@ poziom = {0: "0_ten_sam_poziom",1: "1_różny_poziom"}
 slowniki = {'typ_nr': typ_nr, 'relacja_pe': relacja_pe, 'opis': opis, 'oneway': oneway, 'zakazy':zakazy, 'przejazdy':przejazdy, 'lights':lights, 'lep':lep, '_type':_type,
             'end_type':end_type, 'typ_gus': typ_gus, 'poziom':poziom}
 
+# Inicjalizacja aplikacji Dash
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 server = app.server
 
+# Styl kontenera
 container_style = {
     'margin': '10px',
     'display': 'flex',
@@ -68,13 +73,27 @@ color_mapping = {}
 gdf = None
 full_path = None  
 
+# Rozkład interfejsu użytkownika
 app.layout = html.Div(style={'backgroundColor': '#f2f2f2'}, children=[
     html.Div([
-        dcc.Input(
-            id='folder-path-input',
-            type='text',
-            placeholder='Wprowadź ścieżkę do pliku',
-            style={'width': '100%', 'margin': '10px'}
+        dcc.Upload(
+            id='upload-data',
+            children=html.Div([
+                'Przeciągnij i upuść lub ',
+                html.A('wybierz plik ZIP z SHP')
+            ]),
+            style={
+                'width': '100%',
+                'height': '60px',
+                'lineHeight': '60px',
+                'borderWidth': '1px',
+                'borderStyle': 'dashed',
+                'borderRadius': '5px',
+                'textAlign': 'center',
+                'margin': '10px'
+            },
+            # Wielokrotne przesyłanie plików jest dozwolone
+            multiple=False
         ),
         html.Div(id='output-data-upload')
     ], style=container_style),
@@ -108,228 +127,201 @@ app.layout = html.Div(style={'backgroundColor': '#f2f2f2'}, children=[
 ])
 
 
-def display_selected_column_values(selected_column):
-    global gdf
-    if selected_column and gdf is not None:
-        values = gdf[selected_column].unique()
-        return values.tolist() if values is not None else []
-    else:
-        return []
-
-
-@app.callback(
-    Output('output-data-upload', 'children'),
-    [Input('folder-path-input', 'value')]
-)
-def display_shp(folder_path):
-    global full_path
-    full_path = folder_path
-    if folder_path:
-        return html.Div(
-            f'Folder path: {folder_path}',
-            style={
-                'position': 'absolute',
-                'top': '80px',
-                'left': '350px',
-                'font-family': 'Verdana, sans-serif',
-                'font-size': '11px',
-                'font-style': 'italic',
-                'color': '#6699ff',
-            }
-        )
-    else:
-        return None
-
-
-@app.callback(
-    Output('map-output-container', 'children'),
-    [Input('column-dropdown', 'value'),
-     Input({'type': 'color-picker', 'index': ALL}, 'value')],
-    [State('map-output-container', 'children'),
-     State('folder-path-input', 'value'),
-     State({'type': 'color-square', 'index': ALL}, 'id'),
-     State({'type': 'color-picker', 'index': ALL}, 'id')]
-)
-def update_map(selected_column, color_hex_values, current_map_children, full_path, square_ids, color_picker_ids):
-    global color_mapping
-    global gdf
-
-    etykieta = None
-
-    if selected_column is not None:
-        if gdf is None:
-            gdf = gpd.read_file(full_path)
-            gdf = gdf.to_crs(epsg=4326)
-
-        center_lat = gdf.geometry.centroid.y.mean()
-        center_lon = gdf.geometry.centroid.x.mean()
-
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles='Cartodb Positron')
-
-        marker_cluster = MarkerCluster(disable_clustering_at_zoom=11).add_to(m)
-
-        if color_hex_values is not None:
-            color_hex_values = [color['hex'] for color in color_hex_values if color is not None]
-
-        if color_hex_values:
-            for color, picker_id in zip(color_hex_values, color_picker_ids):
-                value = picker_id['index']
-                color_mapping[value] = color
-        else:
-            color_mapping = {value: f'#{randint(0, 0xFFFFFF):06x}' for value in gdf[selected_column].unique()}
-
-        for idx, row in gdf.iterrows():
-            geom = row.geometry
-            value = row[selected_column] if selected_column else None
-
-            if selected_column in slowniki:
-                etykieta = slowniki[selected_column]
-                if 'crossing' in full_path and etykieta == status:
-                    etykieta = status_road
-
-            color = color_mapping.get(row[selected_column], 'blue')
-            if geom.geom_type == 'MultiPoint':
-                for point in geom.geoms:
-                    folium.CircleMarker(location=[point.y, point.x], radius=5, color=color, fill=True,
-                                        fill_color=color,
-                                        name=str(value)).add_to(marker_cluster)
-            elif geom.geom_type == 'Point':
-                folium.CircleMarker(location=[geom.y, geom.x], radius=5, color=color, fill=True,
-                                    fill_color=color,
-                                    name=str(value)).add_to(marker_cluster)
-            elif geom.geom_type == 'LineString':
-                folium.PolyLine(locations=[(point[1], point[0]) for point in geom.coords], color=color).add_to(m)
-
-        legend_table_rows = []
-        if etykieta:
-            legend_table_rows.extend([html.Tr([html.Th("Legenda")])])
-            legend_table_rows.extend(
-                [html.Tr([html.Td(etykieta.get(value, value)),
-                          html.Td(style={"background-color": color, "width": "30px", "height": "20px"})]) for
-                 value, color in color_mapping.items()])
-        else:
-            legend_table_rows.extend([html.Tr([html.Th("Legenda")])])
-            legend_table_rows.extend(
-                [html.Tr([html.Td(value),
-                          html.Td(style={"background-color": color, "width": "30px", "height": "20px"})]) for
-                 value, color in color_mapping.items()])
-        legend_table = html.Table(legend_table_rows,
-                                  style={"background-color": "white", "border": "1px solid black", "padding": "10px",
-                                         "border-radius": "5px"})
-        legend_div = html.Div(legend_table,
-                              style={'position': 'absolute', 'top': '10px', 'right': '10px', 'zIndex': 1000})
-        map_with_legend = html.Div(
-            [html.Iframe(id='map', srcDoc=m.get_root().render(), style={'width': '100%', 'height': '650px'}),
-             legend_div])
-
-        return map_with_legend
-    elif current_map_children:
-        return current_map_children
-    else:
-        return None
-
-
-
 
 
 @app.callback(
     Output('column-dropdown', 'options'),
-    [Input('folder-path-input', 'value'),
-     Input('reset-button', 'n_clicks')],  
-    [State('column-dropdown', 'options'),
-     State('folder-path-input', 'value')]  
+    [Input('upload-data', 'contents')],
+    [State('upload-data', 'filename')]
 )
-def update_column_dropdown(full_path, reset_clicks, previous_options, folder_path):
-    global gdf
-
-    changed_shp = False
-    if full_path:
-        if full_path != folder_path:
-            changed_shp = True
-
-    if full_path and os.path.isfile(full_path):
-        if gdf is None or reset_clicks or changed_shp:  
-            gdf = gpd.read_file(full_path)
-            print(full_path)
-            gdf = gdf.to_crs(epsg=4326)
-
-        columns = gdf.columns.tolist()
-        return [{'label': col, 'value': col} for col in columns]
+def update_column_dropdown_options(contents, filename):
+    if contents is not None:
+        content_type, content_string = contents.split(',')
+        decoded = base64.b64decode(content_string)
+        try:
+            with zipfile.ZipFile(BytesIO(decoded)) as zip_file:
+                temp_dir = tempfile.mkdtemp()
+                zip_file.extractall(temp_dir)
+                shp_files = [file for file in os.listdir(temp_dir) if file.endswith('.shp')]
+                if shp_files:
+                    gdf = gpd.read_file(os.path.join(temp_dir, shp_files[0]))
+                    column_names = gdf.columns.tolist()
+                    # Zwróć opcje dla listy rozwijanej, gdzie label i value będą takie same (nazwy kolumn)
+                    return [{'label': col, 'value': col} for col in column_names]
+                else:
+                    return [{'label': 'Brak pliku SHP w archiwum ZIP', 'value': ''}]
+        except Exception as e:
+            return [{'label': 'Wystąpił błąd podczas przetwarzania pliku', 'value': ''}]
     else:
-        return previous_options or []
+        return []
+
+    
 
 
-@app.callback(
-    Output('new-content', 'children'),
-    [Input('change-button', 'n_clicks'),
-     Input({'type': 'color-picker', 'index': ALL}, 'value'),
-     Input('close-change-color-button', 'n_clicks')],
-    [State('column-dropdown', 'value'),
-     State('folder-path-input', 'value'),
-     State({'type': 'color-square', 'index': ALL}, 'id'),
-     State({'type': 'color-picker', 'index': ALL}, 'id'),  # Dodajemy `id` kolorowych wybieraków jako stan
-     State('new-content', 'children')]
-)
-def update_content_and_color(n_clicks, color_values, close_clicks, selected_column, folder_path, square_ids,
-                             color_picker_ids, current_children):
-    global color_mapping
-    global gdf
-    global full_path
-
-    filename = os.path.basename(folder_path) if folder_path else None
-
-    if color_values is not None and dash.callback_context.triggered[0]['prop_id'] != 'change-button.n_clicks':
-        color_hex_values = [color['hex'] for color in color_values]
-        for color, picker_id in zip(color_hex_values, square_ids):
-            value = picker_id['index']
-            color_mapping[value] = color
-
-    if close_clicks:
-        return None
-
-    if n_clicks:
-        if selected_column and filename:
-            if gdf is None:
-                full_path = os.path.join(folder_path, filename)
-                gdf = gpd.read_file(full_path)
-                gdf = gdf.to_crs(epsg=4326)
-
-            selected_column_values = display_selected_column_values(selected_column)
-            unique_values_html = []
-
-            for value in selected_column_values:
-                color_square = html.Div(
-                    style={
-                        'background-color': color_mapping.get(value, '#000000'),
-                        'width': '20px',
-                        'height': '20px',
-                        'border': '1px solid black',
-                        'margin-right': '10px',
-                        'margin-bottom': '10px',
-                        'margin-left': '10px'
-                    },
-                    id={'type': 'color-square', 'index': value}
-                )
-                color_picker = daq.ColorPicker(
-                    id={'type': 'color-picker', 'index': value},
-                    value=dict(hex=color_mapping.get(value, '#000000')),
-                    style={'height': '200px', 'margin-left': '0px', 'margin-right': '50px', 'margin-bottom': '50px'}
-                )
-                value_with_square = html.Div(
-                    [color_square, value, color_picker],
-                    style={'margin-left': '10px'}
-                )
-                unique_values_html.append(value_with_square)
-
-            return html.Div(
-                [html.Button("Zamknij", id="close-change-color-button", n_clicks=0,
-                             style={'position': 'absolute', 'top': '10px', 'right': '10px'}),
-                 *unique_values_html])
-
-    raise PreventUpdate
 
 
+
+
+# @app.callback(
+#     Output('map-output-container', 'children'),
+#     [Input('column-dropdown', 'value'),
+#      Input({'type': 'color-picker', 'index': ALL}, 'value')],
+#     [State('map-output-container', 'children'),
+#      State('upload-data', 'filename'),
+#      State({'type': 'color-square', 'index': ALL}, 'id'),
+#      State({'type': 'color-picker', 'index': ALL}, 'id')]
+# )
+# def update_map(selected_column, color_hex_values, current_map_children, full_path, square_ids, color_picker_ids):
+#     global color_mapping
+#     global gdf
+
+#     etykieta = None
+
+#     if selected_column is not None:
+#         if gdf is None:
+#             gdf = gpd.read_file(full_path)
+#             gdf = gdf.to_crs(epsg=4326)
+
+#         center_lat = gdf.geometry.centroid.y.mean()
+#         center_lon = gdf.geometry.centroid.x.mean()
+
+#         m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles='Cartodb Positron')
+
+#         marker_cluster = MarkerCluster(disable_clustering_at_zoom=11).add_to(m)
+
+#         if color_hex_values is not None:
+#             color_hex_values = [color['hex'] for color in color_hex_values if color is not None]
+
+#         if color_hex_values:
+#             for color, picker_id in zip(color_hex_values, color_picker_ids):
+#                 value = picker_id['index']
+#                 color_mapping[value] = color
+#         else:
+#             color_mapping = {value: f'#{randint(0, 0xFFFFFF):06x}' for value in gdf[selected_column].unique()}
+
+#         for idx, row in gdf.iterrows():
+#             geom = row.geometry
+#             value = row[selected_column] if selected_column else None
+
+#             if selected_column in slowniki:
+#                 etykieta = slowniki[selected_column]
+#                 if 'crossing' in full_path and etykieta == status:
+#                     etykieta = status_road
+
+#             color = color_mapping.get(row[selected_column], 'blue')
+#             if geom.geom_type == 'MultiPoint':
+#                 for point in geom.geoms:
+#                     folium.CircleMarker(location=[point.y, point.x], radius=5, color=color, fill=True,
+#                                         fill_color=color,
+#                                         name=str(value)).add_to(marker_cluster)
+#             elif geom.geom_type == 'Point':
+#                 folium.CircleMarker(location=[geom.y, geom.x], radius=5, color=color, fill=True,
+#                                     fill_color=color,
+#                                     name=str(value)).add_to(marker_cluster)
+#             elif geom.geom_type == 'LineString':
+#                 folium.PolyLine(locations=[(point[1], point[0]) for point in geom.coords], color=color).add_to(m)
+
+#         legend_table_rows = []
+#         if etykieta:
+#             legend_table_rows.extend([html.Tr([html.Th("Legenda")])])
+#             legend_table_rows.extend(
+#                 [html.Tr([html.Td(etykieta.get(value, value)),
+#                           html.Td(style={"background-color": color, "width": "30px", "height": "20px"})]) for
+#                  value, color in color_mapping.items()])
+#         else:
+#             legend_table_rows.extend([html.Tr([html.Th("Legenda")])])
+#             legend_table_rows.extend(
+#                 [html.Tr([html.Td(value),
+#                           html.Td(style={"background-color": color, "width": "30px", "height": "20px"})]) for
+#                  value, color in color_mapping.items()])
+#         legend_table = html.Table(legend_table_rows,
+#                                   style={"background-color": "white", "border": "1px solid black", "padding": "10px",
+#                                          "border-radius": "5px"})
+#         legend_div = html.Div(legend_table,
+#                               style={'position': 'absolute', 'top': '10px', 'right': '10px', 'zIndex': 1000})
+#         map_with_legend = html.Div(
+#             [html.Iframe(id='map', srcDoc=m.get_root().render(), style={'width': '100%', 'height': '650px'}),
+#              legend_div])
+
+#         return map_with_legend
+#     elif current_map_children:
+#         return current_map_children
+#     else:
+#         return None
+
+
+
+
+
+# @app.callback(
+#     Output('new-content', 'children'),
+#     [Input('change-button', 'n_clicks'),
+#      Input({'type': 'color-picker', 'index': ALL}, 'value'),
+#      Input('close-change-color-button', 'n_clicks')],
+#     [State('column-dropdown', 'value'),
+#      State('upload-data', 'filename'),
+#      State({'type': 'color-square', 'index': ALL}, 'id'),
+#      State({'type': 'color-picker', 'index': ALL}, 'id'),
+#      State('new-content', 'children')]
+# )
+# def update_content_and_color(n_clicks, color_values, close_clicks, selected_column, folder_path, square_ids,
+#                              color_picker_ids, current_children):
+#     global color_mapping
+#     global gdf
+#     global full_path
+
+#     filename = os.path.basename(folder_path) if folder_path else None
+
+#     if color_values is not None and dash.callback_context.triggered[0]['prop_id'] != 'change-button.n_clicks':
+#         color_hex_values = [color['hex'] for color in color_values]
+#         for color, picker_id in zip(color_hex_values, square_ids):
+#             value = picker_id['index']
+#             color_mapping[value] = color
+
+#     if close_clicks:
+#         return None
+
+#     if n_clicks:
+#         if selected_column and filename:
+#             if gdf is None:
+#                 full_path = os.path.join(folder_path, filename)
+#                 gdf = gpd.read_file(full_path)
+#                 gdf = gdf.to_crs(epsg=4326)
+
+#             selected_column_values = display_selected_column_values(selected_column)
+#             unique_values_html = []
+
+#             for value in selected_column_values:
+#                 color_square = html.Div(
+#                     style={
+#                         'background-color': color_mapping.get(value, '#000000'),
+#                         'width': '20px',
+#                         'height': '20px',
+#                         'border': '1px solid black',
+#                         'margin-right': '10px',
+#                         'margin-bottom': '10px',
+#                         'margin-left': '10px'
+#                     },
+#                     id={'type': 'color-square', 'index': value}
+#                 )
+#                 color_picker = daq.ColorPicker(
+#                     id={'type': 'color-picker', 'index': value},
+#                     value=dict(hex=color_mapping.get(value, '#000000')),
+#                     style={'height': '200px', 'margin-left': '0px', 'margin-right': '50px', 'margin-bottom': '50px'}
+#                 )
+#                 value_with_square = html.Div(
+#                     [color_square, value, color_picker],
+#                     style={'margin-left': '10px'}
+#                 )
+#                 unique_values_html.append(value_with_square)
+
+#             return html.Div(
+#                 [html.Button("Zamknij", id="close-change-color-button", n_clicks=0,
+#                              style={'position': 'absolute', 'top': '10px', 'right': '10px'}),
+#                  *unique_values_html])
+
+#     raise PreventUpdate
 
 
 if __name__ == '__main__':
-    app.run_server(debug=True, host = '127.0.0.1', port = 8050)
+    app.run_server(debug=True, host='127.0.0.1', port=8050)
