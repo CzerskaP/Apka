@@ -73,30 +73,8 @@ app.layout = html.Div(style={'backgroundColor': '#f2f2f2'}, children=[
         dcc.Input(
             id='folder-path-input',
             type='text',
-            placeholder='Wprowadź ścieżkę do folderu',
+            placeholder='Wprowadź ścieżkę do pliku',
             style={'width': '100%', 'margin': '10px'}
-        ),
-        dcc.Upload(
-            id='upload-shp',
-            children=html.Div([
-                'Przeciągnij plik SHP lub ',
-                html.A('kliknij tutaj')
-            ]),
-            style={
-                'width': '100%',
-                'height': '60px',
-                'lineHeight': '60px',
-                'borderWidth': '2px',
-                'borderStyle': 'inset',
-                'borderRadius': '5px',
-                'textAlign': 'center',
-                'font-family': 'Lucida Sans Unicode, sans-serif',
-                'margin': '10px',
-                'backgroundColor': 'white',
-                'color': 'black',
-                'borderColor': '#cccccc',
-            },
-            accept='.shp'
         ),
         html.Div(id='output-data-upload')
     ], style=container_style),
@@ -124,7 +102,7 @@ app.layout = html.Div(style={'backgroundColor': '#f2f2f2'}, children=[
                      style={'backgroundColor': 'white', 'position': 'relative', 'width': '250px', 'zIndex': '1000'}),
             html.Button("Zamknij", id="close-change-color-button", n_clicks=0,
                         style={'position': 'absolute', 'top': '90px', 'right': '10px', 'display': 'none'})
-        ], style={'position': 'absolute', 'right': '300px', 'top': '150px', 'width': '140px', 'display': 'flex',
+        ], style={'position': 'absolute', 'right': '300px', 'top': '70px', 'width': '140px', 'display': 'flex',
                   'align-items': 'center', 'justify-content': 'space-between'})
     ], style=container_style)
 ])
@@ -141,22 +119,18 @@ def display_selected_column_values(selected_column):
 
 @app.callback(
     Output('output-data-upload', 'children'),
-    [Input('upload-shp', 'contents')],
-    [State('upload-shp', 'filename'),
-     State('folder-path-input', 'value')]
+    [Input('folder-path-input', 'value')]
 )
-def display_shp(contents, filename, folder_path):
+def display_shp(folder_path):
     global full_path
-    if contents is not None:
-        file_name = os.path.basename(filename)
-        print("Nazwa pliku SHP:", file_name)
-        full_path = os.path.join(folder_path, file_name)
+    full_path = folder_path
+    if folder_path:
         return html.Div(
-            f'Załadowano plik: {file_name}',
+            f'Folder path: {folder_path}',
             style={
                 'position': 'absolute',
                 'top': '80px',
-                'left': '50px',
+                'left': '350px',
                 'font-family': 'Verdana, sans-serif',
                 'font-size': '11px',
                 'font-style': 'italic',
@@ -169,24 +143,20 @@ def display_shp(contents, filename, folder_path):
 
 @app.callback(
     Output('map-output-container', 'children'),
-    [Input('upload-shp', 'contents'),
-     Input('column-dropdown', 'value'),
+    [Input('column-dropdown', 'value'),
      Input({'type': 'color-picker', 'index': ALL}, 'value')],
-    [State('upload-shp', 'filename'),
-     State({'type': 'color-picker', 'index': ALL}, 'id'),
-     State('map-output-container', 'children'),
-     State('folder-path-input', 'value')]
+    [State('map-output-container', 'children'),
+     State('folder-path-input', 'value'),
+     State({'type': 'color-square', 'index': ALL}, 'id'),
+     State({'type': 'color-picker', 'index': ALL}, 'id')]
 )
-def update_map(contents, selected_column, color_hex_values, filename, color_picker_ids, current_map_children,
-               folder_path):
+def update_map(selected_column, color_hex_values, current_map_children, full_path, square_ids, color_picker_ids):
     global color_mapping
     global gdf
-    global full_path
 
     etykieta = None
 
-    if contents is not None and selected_column is not None:
-        full_path = os.path.join(folder_path, filename)
+    if selected_column is not None:
         if gdf is None:
             gdf = gpd.read_file(full_path)
             gdf = gdf.to_crs(epsg=4326)
@@ -214,7 +184,7 @@ def update_map(contents, selected_column, color_hex_values, filename, color_pick
 
             if selected_column in slowniki:
                 etykieta = slowniki[selected_column]
-                if 'crossing' in filename and etykieta == status:
+                if 'crossing' in full_path and etykieta == status:
                     etykieta = status_road
 
             color = color_mapping.get(row[selected_column], 'blue')
@@ -259,27 +229,25 @@ def update_map(contents, selected_column, color_hex_values, filename, color_pick
         return None
 
 
+
+
+
 @app.callback(
     Output('column-dropdown', 'options'),
-    [Input('upload-shp', 'contents'),
+    [Input('folder-path-input', 'value'),
      Input('reset-button', 'n_clicks')],  
-    [State('upload-shp', 'filename'),
-     State('folder-path-input', 'value'),
-     State('column-dropdown', 'options'),
-     State('upload-shp', 'last_modified')]  
+    [State('column-dropdown', 'options'),
+     State('folder-path-input', 'value')]  
 )
-def update_column_dropdown(contents, reset_clicks, filename, folder_path, previous_options, last_modified):
+def update_column_dropdown(full_path, reset_clicks, previous_options, folder_path):
     global gdf
-    global full_path
 
     changed_shp = False
-    if filename and last_modified:
-        current_full_path = os.path.join(folder_path, filename)
-        if current_full_path != full_path:
+    if full_path:
+        if full_path != folder_path:
             changed_shp = True
-            full_path = current_full_path
 
-    if contents is not None:
+    if full_path and os.path.isfile(full_path):
         if gdf is None or reset_clicks or changed_shp:  
             gdf = gpd.read_file(full_path)
             print(full_path)
@@ -291,23 +259,24 @@ def update_column_dropdown(contents, reset_clicks, filename, folder_path, previo
         return previous_options or []
 
 
-
 @app.callback(
     Output('new-content', 'children'),
     [Input('change-button', 'n_clicks'),
      Input({'type': 'color-picker', 'index': ALL}, 'value'),
      Input('close-change-color-button', 'n_clicks')],
     [State('column-dropdown', 'value'),
-     State('upload-shp', 'filename'),
+     State('folder-path-input', 'value'),
      State({'type': 'color-square', 'index': ALL}, 'id'),
-     State('new-content', 'children'),
-     State('folder-path-input', 'value')]
+     State({'type': 'color-picker', 'index': ALL}, 'id'),  # Dodajemy `id` kolorowych wybieraków jako stan
+     State('new-content', 'children')]
 )
-def update_content_and_color(n_clicks, color_values, close_clicks, selected_column, filename, square_ids,
-                             current_children, folder_path):
+def update_content_and_color(n_clicks, color_values, close_clicks, selected_column, folder_path, square_ids,
+                             color_picker_ids, current_children):
     global color_mapping
     global gdf
     global full_path
+
+    filename = os.path.basename(folder_path) if folder_path else None
 
     if color_values is not None and dash.callback_context.triggered[0]['prop_id'] != 'change-button.n_clicks':
         color_hex_values = [color['hex'] for color in color_values]
@@ -356,7 +325,10 @@ def update_content_and_color(n_clicks, color_values, close_clicks, selected_colu
                 [html.Button("Zamknij", id="close-change-color-button", n_clicks=0,
                              style={'position': 'absolute', 'top': '10px', 'right': '10px'}),
                  *unique_values_html])
+
     raise PreventUpdate
+
+
 
 
 if __name__ == '__main__':
